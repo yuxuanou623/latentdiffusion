@@ -5,7 +5,7 @@ https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bb
 https://github.com/CompVis/taming-transformers
 -- merci
 """
-
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import numpy as np
@@ -83,6 +83,7 @@ class DDPM(pl.LightningModule):
         self.image_size = image_size  # try conv?
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
+        print("conditioning_key",conditioning_key)
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
@@ -298,8 +299,10 @@ class DDPM(pl.LightningModule):
 
         loss_dict = {}
         if self.parameterization == "eps":
+            print("self.parameterizationeps")
             target = noise
         elif self.parameterization == "x0":
+            print("self.parameterizationx0")
             target = x_start
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
@@ -485,6 +488,7 @@ class LatentDiffusion(DDPM):
             x = x.to(self.device)
             encoder_posterior = self.encode_first_stage(x)
             z = self.get_first_stage_encoding(encoder_posterior).detach()
+            print("z", z.shape)
             del self.scale_factor
             self.register_buffer('scale_factor', 1. / z.flatten().std())
             print(f"setting self.scale_factor to {self.scale_factor}")
@@ -510,7 +514,9 @@ class LatentDiffusion(DDPM):
         if not self.cond_stage_trainable:
             if config == "__is_first_stage__":
                 print("Using first stage also as cond stage.")
-                self.cond_stage_model = self.first_stage_model
+                self.cond_stage_model = deepcopy(self.first_stage_model)
+                for param in self.cond_stage_model.parameters():
+                    param.requires_grad = True
             elif config == "__is_unconditional__":
                 print(f"Training {self.__class__.__name__} as an unconditional model.")
                 self.cond_stage_model = None
@@ -653,25 +659,29 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None):
+      
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
         x = x.to(self.device)
         encoder_posterior = self.encode_first_stage(x)
+        
         z = self.get_first_stage_encoding(encoder_posterior).detach()
+     
 
         if self.model.conditioning_key is not None:
             if cond_key is None:
                 cond_key = self.cond_stage_key
+            
             if cond_key != self.first_stage_key:
                 if cond_key in ['caption', 'coordinates_bbox']:
                     xc = batch[cond_key]
                 elif cond_key == 'class_label':
                     xc = batch
                 else:
+                    
                     xc = super().get_input(batch, cond_key).to(self.device)
-            else:
-                xc = x
+            
             if not self.cond_stage_trainable or force_c_encode:
                 if isinstance(xc, dict) or isinstance(xc, list):
                     # import pudb; pudb.set_trace()
@@ -700,6 +710,7 @@ class LatentDiffusion(DDPM):
             out.extend([x, xrec])
         if return_original_cond:
             out.append(xc)
+        
         return out
 
     @torch.no_grad()
@@ -824,7 +835,9 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def encode_first_stage(self, x):
+       
         if hasattr(self, "split_input_params"):
+            
             if self.split_input_params["patch_distributed_vq"]:
                 ks = self.split_input_params["ks"]  # eg. (128, 128)
                 stride = self.split_input_params["stride"]  # eg. (64, 64)
@@ -858,16 +871,19 @@ class LatentDiffusion(DDPM):
                 return decoded
 
             else:
+                
                 return self.first_stage_model.encode(x)
         else:
+            
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
+        x, c = self.get_input(batch, self.first_stage_key, cond_key=self.cond_stage_key)
         loss = self(x, c)
         return loss
 
     def forward(self, x, c, *args, **kwargs):
+        
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         if self.model.conditioning_key is not None:
             assert c is not None
@@ -876,6 +892,7 @@ class LatentDiffusion(DDPM):
             if self.shorten_cond_schedule:  # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+        
         return self.p_losses(x, c, t, *args, **kwargs)
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
@@ -952,19 +969,19 @@ class LatentDiffusion(DDPM):
                 # tokenize crop coordinates for the bounding boxes of the respective patches
                 patch_limits_tknzd = [torch.LongTensor(self.bbox_tokenizer._crop_encoder(bbox))[None].to(self.device)
                                       for bbox in patch_limits]  # list of length l with tensors of shape (1, 2)
-                print(patch_limits_tknzd[0].shape)
+                
                 # cut tknzd crop position from conditioning
                 assert isinstance(cond, dict), 'cond must be dict to be fed into model'
                 cut_cond = cond['c_crossattn'][0][..., :-2].to(self.device)
-                print(cut_cond.shape)
+               
 
                 adapted_cond = torch.stack([torch.cat([cut_cond, p], dim=1) for p in patch_limits_tknzd])
                 adapted_cond = rearrange(adapted_cond, 'l b n -> (l b) n')
-                print(adapted_cond.shape)
+                
                 adapted_cond = self.get_learned_conditioning(adapted_cond)
-                print(adapted_cond.shape)
+                
                 adapted_cond = rearrange(adapted_cond, '(l b) n d -> l b n d', l=z.shape[-1])
-                print(adapted_cond.shape)
+                
 
                 cond_list = [{'c_crossattn': [e]} for e in adapted_cond]
 
@@ -1018,16 +1035,20 @@ class LatentDiffusion(DDPM):
         prefix = 'train' if self.training else 'val'
 
         if self.parameterization == "x0":
+            
             target = x_start
         elif self.parameterization == "eps":
+            
             target = noise
         else:
             raise NotImplementedError()
+        
 
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
+        
 
-        logvar_t = self.logvar[t].to(self.device)
+        logvar_t = self.logvar[t.cpu()].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
@@ -1406,7 +1427,11 @@ class DiffusionWrapper(pl.LightningModule):
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
+            # Checking each tensor's dtype in the list
+            
             cc = torch.cat(c_crossattn, 1)
+            
+            cc = cc.to(dtype=torch.float32, device='cuda')
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
             xc = torch.cat([x] + c_concat, dim=1)

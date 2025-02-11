@@ -154,6 +154,7 @@ class CrossAttention(nn.Module):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
+        
 
         self.scale = dim_head ** -0.5
         self.heads = heads
@@ -172,8 +173,10 @@ class CrossAttention(nn.Module):
 
         q = self.to_q(x)
         context = default(context, x)
+   
         k = self.to_k(context)
         v = self.to_v(context)
+        
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
@@ -210,6 +213,7 @@ class BasicTransformerBlock(nn.Module):
 
     def _forward(self, x, context=None):
         x = self.attn1(self.norm1(x)) + x
+        
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x
